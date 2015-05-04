@@ -1,0 +1,153 @@
+
+from context import flatten
+from toylua.lex import tokenizer
+from toylua.ast import *
+
+
+def values(tokens):
+    return [t.value for t in tokens]
+
+---
+`{
+    'type': 'LR',
+    'default_start': 'chunk',
+    'precedence': [
+        [
+            ('precedence', [('exp', ('prefixexp',))]),
+            ('precedence', ['(']),
+        ],
+        [
+            ('left', ['or']),
+            ('left', ['and']),
+            ('left', ['<', '>', '<=', '>=', '~=', '==']),
+            ('right', ['..']),
+            ('left', ['+', '-']),
+            ('left', ['*', '/', '%']),
+            ('precedence', ['not', '#', ('exp', ('-', 'exp'))]),
+            ('right', ['^']),
+        ],
+    ],
+    'ignore_reduces': {
+        ('stat', ('functioncall',), '('),
+    },
+}`
+
+
+chunk
+  : a=block `a`
+
+block
+  : (ss+=stat)* (ss+=retstat)? `Block(flatten(ss))`
+
+stat
+  : ";" `None`
+  | v=varlist "=" e=explist `Assignment(v[0].location, v, e)`
+  | f=functioncall `f`
+  | s=label `s`
+  | "break" `Break(_loc)`
+  | "goto" n="NAME" `Goto(_loc, n.value)`
+  | "do" b=block "end" `BlockStatement(_loc, b)`
+  | "while" e=exp "do" b=block "end" `While(_loc, e, b)`
+  | "repeat" b=block "until" e=exp `Repeat(_loc, b, e)`
+  | "if" e+=exp "then" b+=block ("elseif" e+=exp "then" b+=block)* ("else" b+=block)? "end" `If(_loc, e, b)`
+  | "for" n="NAME" "=" e1=exp "," e2=exp ("," e3=exp)? "do" b=block "end" `NumericFor(_loc, n, e1, e2, e3, b)`
+  | "for" ns=namelist "in" e=explist "do" b=block "end" `GenericFor(_loc, ns, e, b)`
+  | "function" n=funcname b=funcbody `Function(_loc, n, b[0], b[1])`
+  | "local" "function" n="NAME" b=funcbody `LocalFunction(_loc, FuncName([n.value], None), b[0], b[1])`
+  | "local" ns=namelist ("=" es=explist)? `Local(_loc, ns, es)`
+  | e="EMBEDSTAT" `EmbedStatement(e.location, e.value)`
+
+retstat
+  : "return" (e=explist)? (";")? `Return(_loc, e)`
+
+label
+  : "::" n="NAME" "::" `Label(_loc, n.value)`
+
+funcname
+  : n+="NAME" ("." n+="NAME")* (":" c="NAME")? `FuncName(values(n), c.value if c else None)`
+
+
+varlist
+  : v+=var ("," v+=var)* `v`
+
+var
+  : n="NAME" `Name(n.location, n.value)`
+  | p=prefixexp d="[" e=exp "]" `Brackets(d.location, p, e)`
+  | p=prefixexp "." n="NAME" `Dot(p.location, p, n.value)`
+
+namelist
+  : ns+="NAME" ("," ns+="NAME")* `values(ns)`
+
+prefixexp
+  : v=var `v`
+  | f=functioncall `f`
+  | "(" e=exp ")" `e`
+
+functioncall
+  : p=prefixexp a=args `FunctionCall(a[0], p, None, a[1])`
+  | p=prefixexp d=":" n="NAME" a=args `FunctionCall(d.location, p, n.value, a[1])`
+
+
+explist
+  : e+=exp ("," e+=exp)* `e`
+
+
+exp
+  : "nil" `LuaNil(_loc)`
+  | "false" `LuaFalse(_loc)`
+  | "true" `LuaTrue(_loc)`
+  | n="NUMBER" `Number(_loc, n.value)`
+  | s="STRING" `String(_loc, s.value)`
+  | e="EMBEDEXPR" `EmbedExpression(_loc, e.value)`
+  | "..." `LuaEllipsis(_loc)`
+  | f=functiondef `f`
+  | e=prefixexp `e`
+  | t=tableconstructor `t`
+
+  | l=exp op="or"  r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="and" r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="<"   r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op=">"   r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="<="  r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op=">="  r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="~="  r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="=="  r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op=".."  r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="+"   r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="-"   r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="*"   r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="/"   r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="%"   r=exp `BinOp(op.location, l, op.type, r)`
+  | l=exp op="^"   r=exp `BinOp(op.location, l, op.type, r)`
+
+  | op="not" e=exp       `UnaryOp(op.location, op.type, e)`
+  | op="#" e=exp         `UnaryOp(op.location, op.type, e)`
+  | op="-" e=exp         `UnaryOp(op.location, op.type, e)`
+
+
+args
+  : "(" (e=explist)? ")" `(_loc, e or [])`
+  | t=tableconstructor `(t.location, [t])`
+  | s="STRING" `(s.location, [s.value])`
+
+functiondef
+  : "function" b=funcbody `Function(_loc, None, b[0], b[1])`
+
+funcbody
+  : "(" (a=parlist)? ")" b=block "end" `(flatten(a), b)`
+
+parlist
+  : "..." `LuaEllipsis(_loc)`
+  | n="NAME" ("," p=parlist)? `[n.value, p or []]`
+
+tableconstructor
+  : "{" (f+=field (fieldsep \1)?)? "}" `TableConstructor(_loc, flatten(f))`
+
+field
+  : "[" k=exp "]" "=" v=exp `Field(_loc, k, v)`
+  | n="NAME" "=" v=exp `Field(_loc, String(_loc, n.value), v)`
+  | v=exp `Field(v.location, None, v)`
+
+fieldsep
+  : "," `None`
+  | ";" `None`

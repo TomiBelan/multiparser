@@ -1,0 +1,177 @@
+
+from context import flatten
+from toylua.lex import tokenizer
+from toylua.ast import *
+
+
+def values(tokens):
+    return [t.value for t in tokens]
+
+def assignment_or_functioncall(exps, assignment):
+    # Assignments and function calls use the same grammar rule, to keep it LL.
+    # Based on exprstat() and assignment() in lparser.c.
+    if not assignment:
+        if not isinstance(exps[0], FunctionCall):
+            raise ParseError(exps[0].location, 'Expected assignment or function call')
+        return exps[0]
+    else:
+        for e in exps:
+            if not isinstance(e, (Name, Dot, Brackets)):
+                raise ParseError(e.location, 'Invalid lvalue')
+        return Assignment(exps[0].location, exps, assignment)
+
+def process_suffixedexp(base, suffixes):
+    for suffix_fn in suffixes:
+        base = suffix_fn(base)
+    return base
+
+def left_associative(symbols):
+    symbols = iter(symbols)
+    left = next(symbols)
+    while True:
+        try:
+            op = next(symbols)
+            right = next(symbols)
+            left = BinOp(op.location, left, op.type, right)
+        except StopIteration:
+            return left
+
+def check_key(e, errloc):
+    if not isinstance(e, Name):
+        raise ParseError(errloc, "Unexpected '='")
+    return String(e.location, e.name)
+
+---
+`{
+    'type': 'LL',
+    'default_start': 'chunk',
+    'llconflicts': {
+        ('suffixedexp__1', '('): ('suffixedexp_suffix', 'suffixedexp__1'),
+    },
+    'precedence': [
+        [
+            ('precedence', [('suffixedexp__1', ())]),
+            ('precedence', ['(']),
+        ],
+    ],
+}`
+
+chunk
+  : a=block `a`
+
+block
+  : (ss+=stat)* (ss+=retstat)? `Block(flatten(ss))`
+
+stat
+  : ";" `None`
+  | p+=suffixedexp (("," p+=suffixedexp)* "=" a=explist)? `assignment_or_functioncall(p, a)`
+  | s=label `s`
+  | "break" `Break(_loc)`
+  | "goto" n="NAME" `Goto(_loc, n.value)`
+  | "do" b=block "end" `BlockStatement(_loc, b)`
+  | "while" e=exp "do" b=block "end" `While(_loc, e, b)`
+  | "repeat" b=block "until" e=exp `Repeat(_loc, b, e)`
+  | "if" e+=exp "then" b+=block ("elseif" e+=exp "then" b+=block)* ("else" b+=block)? "end" `If(_loc, e, b)`
+  | "for" n="NAME" s=stat_for `s(_loc, n)`
+  | "function" n=funcname b=funcbody `Function(_loc, n, b[0], b[1])`
+  | "local" s=stat_local `s(_loc)`
+  | e="EMBEDSTAT" `EmbedStatement(e.location, e.value)`
+
+stat_for
+  : "=" e1=exp "," e2=exp ("," e3=exp)? "do" b=block "end" `lambda loc, n: NumericFor(loc, n, e1, e2, e3, b)`
+  | ( "," n+="NAME" )* "in" e=explist "do" b=block "end" `lambda loc, n1: GenericFor(loc, values([n1]+n), e, b)`
+
+stat_local
+  : "function" n="NAME" b=funcbody `lambda loc: LocalFunction(loc, FuncName([n.value], None), b[0], b[1])`
+  | ns+="NAME" ("," ns+="NAME")* ("=" es=explist)? `lambda loc: Local(loc, values(ns), es)`
+
+retstat
+  : "return" (e=explist)? (";")? `Return(_loc, e)`
+
+label
+  : "::" n="NAME" "::" `Label(_loc, n.value)`
+
+funcname
+  : n+="NAME" ("." n+="NAME")* (":" c="NAME")? `FuncName(values(n), c.value if c else None)`
+
+
+# Note that the "prefixexp" and "var" nonterminals in the Lua manual are not LL.
+# Instead, this grammar uses "primaryexp" and "suffixedexp" based on lparser.c.
+
+primaryexp
+  : n="NAME" `Name(n.location, n.value)`
+  | "(" e=exp ")" `e`
+
+suffixedexp
+  : e=primaryexp (s+=suffixedexp_suffix)* `process_suffixedexp(e, s)`
+suffixedexp_suffix
+  : d="." n="NAME" `lambda left: Dot(d.location, left, n.value)`
+  | d="[" e=exp "]" `lambda left: Brackets(d.location, left, e)`
+  | d=":" n="NAME" a=args `lambda left: FunctionCall(d.location, left, n.value, a[1])`
+  | a=args `lambda left: FunctionCall(a[0], left, None, a[1])`
+
+
+simpleexp
+  : "nil" `LuaNil(_loc)`
+  | "false" `LuaFalse(_loc)`
+  | "true" `LuaTrue(_loc)`
+  | n="NUMBER" `Number(_loc, n.value)`
+  | s="STRING" `String(_loc, s.value)`
+  | e="EMBEDEXPR" `EmbedExpression(_loc, e.value)`
+  | "..." `LuaEllipsis(_loc)`
+  | f=functiondef `f`
+  | e=suffixedexp `e`
+  | t=tableconstructor `t`
+
+
+explist
+  : e+=exp ("," e+=exp)* `e`
+
+
+exp
+  : exp2 ("or" exp2)* `left_associative(_all)`
+exp2
+  : exp3 ("and" exp3)* `left_associative(_all)`
+exp3
+  : exp4 (("<"|">"|"<="|">="|"~="|"==") exp4)* `left_associative(_all)`
+exp4
+  : l=exp5 (op=".." r=exp4)? `BinOp(op.location, l, op.type, r) if r else l`
+exp5
+  : exp6 (("+"|"-") exp6)* `left_associative(_all)`
+exp6
+  : exp7 (("*"|"/"|"%") exp7)* `left_associative(_all)`
+exp7
+  : (op="not"|op="#"|op="-") e=exp7 `UnaryOp(op.location, op.type, e)`
+  | e=exp8 `e`
+exp8
+  : l=simpleexp (op="^" r=exp7)? `BinOp(op.location, l, op.type, r) if r else l`
+
+
+args
+  : "(" (e=explist)? ")" `(_loc, e or [])`
+  | t=tableconstructor `(t.location, [t])`
+  | s="STRING" `(s.location, [s.value])`
+
+functiondef
+  : "function" b=funcbody `Function(_loc, None, b[0], b[1])`
+
+funcbody
+  : "(" (a=parlist)? ")" b=block "end" `(flatten(a), b)`
+
+parlist
+  : "..." `LuaEllipsis(_loc)`
+  | n="NAME" ("," p=parlist)? `[n.value, p or []]`
+
+tableconstructor
+  : "{" (f=fieldlist)? "}" `TableConstructor(_loc, flatten(f))`
+
+fieldlist
+  : f=field (fieldsep (l=fieldlist)? )? `[f, l]`
+
+field
+  : "[" k=exp "]" "=" v=exp `Field(_loc, k, v)`
+  | a=exp ("=" b=exp)? `Field(a.location, check_key(a, _loc), b) if b else Field(a.location, None, a)`
+
+fieldsep
+  : "," `None`
+  | ";" `None`

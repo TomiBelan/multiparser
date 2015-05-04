@@ -1,0 +1,24 @@
+
+from context import Token
+from context import ParserContext as BaseParserContext
+
+parsers = {}
+%(imports)s
+
+embeds = %(embeds)r
+
+class ParserContext(BaseParserContext):
+    def embed_token(self, outer_language):
+        loc = self.location
+        for outer, token_type, inner, start, opener, closer in embeds:
+            if outer == outer_language and self.peek(len(opener)) == opener:
+                self.advance(len(opener))
+                inner_ast = self.parsers[inner](self, start, closer)
+                return Token(loc, token_type, inner_ast)
+
+ParserContext.parsers = parsers
+ParserContext.embeds = embeds
+
+def parse_text(input):
+    ctx = ParserContext(input)
+    return parse_%(root)s(ctx)

@@ -1,0 +1,22 @@
+
+(*multiparser_options(
+    parseinfo=True,
+    semantics=import_module('toycalc.pegsemantics').Semantics(),
+)*)
+
+start = @:sum $ ;
+
+sum = l:product { ops+:('+'|'-') rs+:product } ;
+
+product = l:factor { ops+:('*'|'/') rs+:factor } ;
+
+factor = '-' m:factor | p:power ;
+
+power = l:value [ '^' r:factor ] ;
+
+value = @:number | @:embedloc | '(' @:sum ')' ;
+
+number = n:?/[0-9]+/? ;
+embedloc = e:embed_EMBEDEXPR ;
+
+embed_EMBEDEXPR = !() ;

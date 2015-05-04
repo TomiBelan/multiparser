@@ -1,0 +1,43 @@
+
+from context import ParseError
+
+def parse(ctx, start_nt=None, close_with=None):
+    stack = [INITIAL[(start_nt or %(start)r, close_with or 'EOF')]]
+    results = []
+    tok_iter = tokenizer(ctx, close_with)
+    token = next(tok_iter)
+
+    while True:
+        action = TABLE[stack[-1]].get(token.type)
+
+        if action is None:
+            nonterminals = { nt for nt, right, action in RULES }
+            choices = { repr(k) for k in TABLE[stack[-1]] if k not in nonterminals }
+            raise ParseError(token.location, "Unexpected {}, expected {}".format(
+                repr(token.type), ', '.join(sorted(choices))))
+
+        is_shift, action_value = action
+
+        if is_shift:
+            results.append(token)
+            stack.append(action_value)
+            token = next(tok_iter)
+        else:
+            if action_value is None: break
+            left, right, rule_action = RULES[action_value]
+            n = len(right)
+
+            args = results[len(results) - n:]
+            del results[len(results) - n:]
+            results.append(rule_action(ctx, *args))
+
+            del stack[len(stack) - n:]
+            new_is_shift, new_state = TABLE[stack[-1]][left]
+            assert new_is_shift
+            stack.append(new_state)
+
+    return results[0]
+
+INITIAL = %(initial)r
+RULES = %(rules)r
+TABLE = %(table)r

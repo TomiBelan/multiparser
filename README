@@ -1,0 +1,60 @@
+
+Multiparser
+===========
+
+Implementácia diplomovej práce:
+"Syntaktická analýza vnorených programovacích jazykov"
+
+Tomáš Belan
+
+
+
+Čo nainštalovať
+---------------
+
+Multiparser potrebuje:
+
+* Python 3
+  (otestované s verziou 3.4, možno funguje aj s nižšími verziami a s PyPy 3)
+
+* make
+
+* Grako
+  (pythonová knižnica; otestované s verziou 3.5.1)
+  (potrebné iba pri použití PEG parserov)
+
+
+Ako nainštalovať knižnicu Grako:
+
+A) Pomocou "pip" a "virtualenv" (viď internetové tutoriály)
+
+B) Pomocou "pip":
+   sudo pip install grako
+
+C) Stiahnuť https://pypi.python.org/packages/source/g/grako/grako-3.5.1.tar.gz
+   Rozbaliť archív na dočasné miesto
+   Skopírovať adresár "grako-3.5.1/grako" do tohto adresára
+
+Skúška správnosti: príkaz "python3 -m grako" by mal vypísať "usage: grako ..."
+
+
+
+Ako používať
+------------
+
+"make" vygeneruje parsery pre všetky ukážkové jazyky. Chvíľu to môže trvať.
+
+Skript runparser.py spustí daný parser na danom vstupe a zobrazí výsledok.
+Napríklad:
+- python3 runparser.py toylua.lrgrammar_out toylua/example1.lua
+- python3 runparser.py toypython.grammar_out toypython/example_goodindent.py
+- python3 runparser.py mix_alpha.composite_out mix_alpha/example1.lua
+- python3 runparser.py mix_beta.composite_out mix_beta/example1.py
+- python3 runparser.py mix_gamma.composite_out mix_gamma/example1.py
+
+Môžete vyrobiť vlastné jazyky a vlastné nastavenia zložených parserov.
+Skripty compose.py, makell.py, makelr.py, makepeg.py z nich vygenerujú
+spustiteľný kód. Viď Makefile.
+
+Súbory example_* v hlavnom adresári obsahujú príklady z textu práce.
+

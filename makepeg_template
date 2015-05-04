@@ -1,0 +1,70 @@
+
+from importlib import import_module
+from grako.parsing import graken
+from grako.buffering import Buffer
+from %(module_name)s import %(parser_name)sParser
+
+
+class IntegratedBuffer(Buffer):
+    def __init__(self, ctx, **kwargs):
+        self.ctx = ctx
+        super().__init__(ctx.input, **kwargs)
+
+    def _preprocess(self):
+        if not hasattr(self.ctx, 'grako_line_index'):
+            n = len(self.text.splitlines(True))
+            self.ctx.grako_line_index = self._block_index(self.filename, n)
+        self._line_index = self.ctx.grako_line_index
+
+    def _build_line_cache(self):
+        if hasattr(self.ctx, 'grako_line_cache'):
+            self._linecache, self._linecount = self.ctx.grako_line_cache
+        else:
+            super()._build_line_cache()
+            self.ctx.grako_line_cache = self._linecache, self._linecount
+
+
+class Parser(%(parser_name)sParser):
+%(methods)s
+    def _check_eof(self):
+        if self.close_with == None:
+            super()._check_eof()
+        else:
+            self._token(self.close_with)
+
+
+def parse(ctx, start_nt=None, close_with=None):
+    parser = Parser()
+    parser.close_with = close_with
+
+    options = dict(%(options)s)
+
+    options.setdefault('comments_re', parser.comments_re)
+    options.setdefault('eol_comments_re', parser.eol_comments_re)
+    options.setdefault('ignorecase', parser.ignorecase)
+    options.setdefault('nameguard', parser.nameguard)
+    options.setdefault('whitespace', parser.whitespace)
+
+    default_start = options.pop('default_start', 'start')
+
+    buffer = IntegratedBuffer(ctx, **options)
+    buffer.pos = ctx.pos
+    result = parser.parse(buffer, start_nt or default_start, **options)
+    ctx.pos = buffer.pos
+    return result
+
+---
+    @graken()
+    def _embed_%(token_type)s_(self):
+        buffer = self._buffer
+        ctx = buffer.ctx
+        with self._choice():
+%(choices)s
+
+---
+            with self._option():
+                self._token(%(opener)r)
+                self._cut()
+                ctx.pos = buffer.pos
+                self.ast['@'] = ctx.parsers[%(inner)r](ctx, %(start)r, %(closer)r)
+                buffer.pos = ctx.pos

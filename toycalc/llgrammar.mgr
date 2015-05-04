@@ -1,0 +1,35 @@
+from toycalc.lex import tokenizer
+from toycalc.ast import *
+
+handlers = {
+    "+": Add,
+    "-": Sub,
+    "*": Mul,
+    "/": Div,
+}
+
+def left_associative(l, ops, rs):
+    for op, r in zip(ops, rs):
+        handler = handlers[op.type]
+        l = handler(op.location, l, r)
+    return l
+---
+`{
+    'default_start': 'expr',
+    'type': 'LL',
+}`
+
+expr: e=sum `e`
+
+sum: l=product ((ops+="+" | ops+="-") rs+=product)* `left_associative(l, ops, rs)`
+
+product: l=factor ((ops+="*" | ops+="/") rs+=factor)* `left_associative(l, ops, rs)`
+
+factor: "-" e=factor `UnaryMin(_loc, e)`
+  | e=power `e`
+
+power: a=value ("^" b=factor)? `a if b is None else Pow(_loc, a, b)`
+
+value: n=NUMBER `Number(_loc, n.value)`
+  | e=EMBEDEXPR `Embedded(_loc, e.value)`
+  | "(" e=sum ")" `e`

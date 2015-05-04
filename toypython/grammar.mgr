@@ -1,0 +1,383 @@
+
+from context import flatten
+from toypython.lex import tokenizer
+from toypython.ast import *
+
+def set_context(expr, context):
+    if isinstance(expr, (Attribute, Subscript, Name)):
+        return expr._replace(ctx=context)
+
+    if isinstance(expr, Starred):
+        return Starred(expr.location, set_context(expr.value, context), context)
+
+    if isinstance(expr, List) or (isinstance(expr, Tuple) and expr.elts):
+        new_elts = [set_context(e, context) for e in expr.elts]
+        return expr.__class__(expr.location, new_elts, context)
+
+    print(expr)
+    name = expr.__class__.__name__
+    if context == Del():
+        raise ParseError(expr.location, "can't delete %s" % name)
+    else:
+        raise ParseError(expr.location, "can't assign to %s" % name)
+
+def ast_for_testlist(tests, commas):
+    return tests[0] if not commas else Tuple(tests[0].location, tests, Load())
+
+def ast_for_arguments(items):
+    posargs = []
+    vararg = None
+    after_vararg = False
+    kwonlyargs = []
+    kwdefaults = []
+    kwarg = None
+    posdefaults = []
+
+    if items[-1][0] and items[-1][0].type == '**':
+        kwarg = items[-1][1]
+        items = items[:-1]
+
+    if items[-1][0] and items[-1][0].type == '*' and not items[-1][1]:
+        raise ParseError(items[-1][0].location, "named arguments must follow bare *")
+
+    for (star_token, fpdef, default) in items:
+        if star_token and star_token.type == '**':
+            raise ParseError(star_token.location, "**kwargs must be last in arguments list")
+
+        if star_token and after_vararg:
+            raise ParseError(star_token.location, "*args can only be given once")
+
+        if star_token:
+            after_vararg = True
+            vararg = fpdef
+        elif after_vararg:
+            kwonlyargs.append(fpdef)
+            kwdefaults.append(default)
+        else:
+            if default:
+                posdefaults.append(default)
+            elif posdefaults:
+                raise ParseError(fpdef.location, "non-default argument follows default argument")
+            posargs.append(fpdef)
+
+    return arguments(posargs, vararg, kwonlyargs, kwdefaults, kwarg, posdefaults)
+
+def ast_for_dotted_name(name_tokens):
+    rv = None
+    for name_token in name_tokens:
+        if rv:
+            rv = Attribute(rv.location, rv, name_token.value, Load())
+        else:
+            rv = Name(name_token.location, name_token.value, Load())
+    return rv
+
+def ast_for_decorator(loc, name_expr, have_parens, arglist):
+    if not have_parens: return name_expr
+    return ast_for_call(loc, name_expr, arglist)
+
+def ast_for_comprehension(root_comp_for):
+    comps = []
+
+    for item in flatten(root_comp_for):
+        if item[0].type == 'for':
+            token, (exprlist, exprlist_has_comma), iter = item
+            if exprlist_has_comma:
+                target = Tuple(exprlist[0].location, exprlist, Store())
+            else:
+                target = exprlist[0]
+            target = set_context(target, Store())
+            comps.append(comprehension(target, iter, []))
+        else:
+            token, cond = item
+            comps[-1].ifs.append(cond)
+
+    return comps
+
+token_type_to_operator_class = {
+    '|': BitOr,
+    '^': BitXor,
+    '&': BitAnd,
+    '<<': LShift,
+    '>>': RShift,
+    '+': Add,
+    '-': Sub,
+    '*': Mult,
+    '/': Div,
+    '//': FloorDiv,
+    '%': Mod,
+}
+
+def ast_for_binop(symbols):
+    symbols = iter(symbols)
+    left = next(symbols)
+    while True:
+        try:
+            op_token = next(symbols)
+            op_class = token_type_to_operator_class[op_token.type]
+            right = next(symbols)
+            left = BinOp(op_token.location, left, op_class(), right)
+        except StopIteration:
+            return left
+
+def ast_for_power(atom, trailers, factor):
+    for trailer in trailers:
+        atom = trailer(atom)._replace(location=atom.location)
+    if factor:
+        atom = BinOp(atom.location, atom, Pow(), factor)
+    return atom
+
+def ast_for_call(loc, func, arglist):
+    if not arglist: return Call(loc, func, None, None, None, None)
+
+    args = []
+    keywords = []
+    vararg = None
+    kwarg = None
+    keyword_names = set()
+
+    star_token, test, root_comp_for, kwvalue = arglist[0]
+    if len(arglist) == 1 and root_comp_for:
+        value = GeneratorExp(test.location, test, ast_for_comprehension(root_comp_for))
+        arglist = [(None, value, None, None)]
+
+    for (star_token, test, root_comp_for, kwvalue) in arglist:
+        if root_comp_for:
+            raise ParseError(test, "Generator expression must be parenthesized "
+                             "if not sole argument")
+
+    if arglist[-1][0] and arglist[-1][0].type == '**':
+        kwarg = arglist[-1][1]
+        arglist = arglist[:-1]
+
+    for (star_token, test, root_comp_for, kwvalue) in arglist:
+        if star_token and star_token.type == '*':
+            if vararg:
+                raise ParseError(star_token.location, "*expression can only be given once")
+            vararg = test
+        elif star_token and star_token.type == '**':
+            raise ParseError(star_token.location, "**expression must be last in arguments list")
+        elif not kwvalue:
+            if keywords:
+                raise ParseError(test.location, "non-keyword arg after keyword arg")
+            if vararg:
+                raise ParseError(test.location, "only named arguments may follow *expression")
+            args.append(test)
+        elif isinstance(test, Lambda):
+            raise ParseError(test.location, "lambda cannot contain assignment")
+        elif not isinstance(test, Name):
+            raise ParseError(test.location, "keyword can't be an expression")
+        elif test.id in keyword_names:
+            raise ParseError(test.location, "keyword argument repeated")
+        else:
+            keyword_names.add(test.id)
+            keywords.append(keyword(test.id, kwvalue))
+
+    return Call(loc, func, args, keywords, vararg, kwarg)
+
+def ast_for_expr_stmt(base, augassign_op, augassign_value, assignments):
+    if augassign_op:
+        base = set_context(base, Store())
+        if not isinstance(base, (Name, Attribute, Subscript)):
+            raise ParseError(base.location, "illegal expression for augmented assignment")
+        return AugAssign(base.location, base, augassign_op, augassign_value)
+
+    if assignments:
+        value = assignments[-1]
+        targets = []
+        for target in [base] + assignments[:-1]:
+            if isinstance(target, (Yield, YieldFrom)):
+                raise ParseError(target.location, "assignment to yield expression not possible")
+            targets.append(set_context(target, Store()))
+        return Assign(base.location, targets, value)
+
+    return Expr(base.location, base)
+
+def ast_for_if_stmt(tokens, conds, suites, else_suite):
+    for token, cond, suite in reversed(list(zip(tokens, conds, suites))):
+        else_suite = [If(token.location, cond, suite, else_suite or [])]
+    return else_suite
+
+def ast_for_classdef(loc, name, arglist, body):
+    dummy_call = ast_for_call(loc, None, arglist)
+    return ClassDef(loc, name, dummy_call.args, dummy_call.keywords,
+                    dummy_call.starargs, dummy_call.kwargs, body, [])
+
+
+---
+`{
+    'type': 'LL',
+    'default_start': 'file_input',
+}`
+
+
+single_input: NEWLINE `Interactive([])` | s=simple_stmt `Interactive(flatten(s))` | s=compound_stmt `Interactive(flatten(s))`
+file_input: (NEWLINE | s+=stmt)* `Module(flatten(s))`   # ENDMARKER is implied
+eval_input: t=testlist (NEWLINE)* `Expression(t)`    # ENDMARKER is implied
+
+decorator: '@' d=dotted_name ( b='(' (a=arglist)? ')' )? NEWLINE `ast_for_decorator(_loc, ast_for_dotted_name(d), b, a)`
+decorators: d+=decorator (d+=decorator)* `d`
+decorated: d=decorators (cf=classdef | cf=funcdef) `cf._replace(decorator_list=d)`
+funcdef: 'def' n=NAME p=parameters ('->' r=test)? ':' b=suite `FunctionDef(_loc, n.value, p, b, [], r)`
+parameters: '(' (t=typedargslist)? ')' `t or arguments(None, None, None, None, None, None)`
+# ORIGINAL:
+# typedargslist: (tfpdef ('=' test)? (',' tfpdef ('=' test)?)* (','
+#        ('*' (tfpdef)? (',' tfpdef ('=' test)?)* (',' '**' tfpdef)? | '**' tfpdef)?)?
+#      |  '*' (tfpdef)? (',' tfpdef ('=' test)?)* (',' '**' tfpdef)? | '**' tfpdef)
+typedargslist: (l+=typedargslist_item (',' (\1)?)?) `ast_for_arguments(l)`
+typedargslist_item: a=tfpdef ('=' d=test)? `(None, a, d)` | s='*' (a=tfpdef)? `(s, a, None)` | s='**' a=tfpdef `(s, a, None)`
+tfpdef: n=NAME (':' t=test)? `arg(_loc, n.value, t)`
+# ORIGINAL:
+# varargslist: (vfpdef ('=' test)? (',' vfpdef ('=' test)?)* (','
+#        ('*' (vfpdef)? (',' vfpdef ('=' test)?)* (',' '**' vfpdef)? | '**' vfpdef)?)?
+#      |  '*' (vfpdef)? (',' vfpdef ('=' test)?)* (',' '**' vfpdef)? | '**' vfpdef)
+varargslist: (l+=varargslist_item (',' (\1)?)?) `ast_for_arguments(l)`
+varargslist_item: a=vfpdef ('=' d=test)? `(None, a, d)` | s='*' (a=vfpdef)? `(s, a, None)` | s='**' a=vfpdef `(s, a, None)`
+vfpdef: n=NAME `arg(_loc, n.value, None)`
+
+stmt: (simple_stmt | compound_stmt) `_all[0]`
+# ORIGINAL: simple_stmt: small_stmt (';' small_stmt)* (';')? NEWLINE
+simple_stmt: (s+=small_stmt (';' (\1)?)?) NEWLINE `s`
+small_stmt: (embed_stmt | expr_stmt | del_stmt | pass_stmt | flow_stmt |
+             import_stmt | global_stmt | nonlocal_stmt | assert_stmt) `_all[0]`
+embed_stmt: e=EMBEDSTAT `EmbedStat(_loc, e.value)`
+expr_stmt: t=testlist_star_expr (aa=augassign (av=yield_expr|av=testlist) |
+                     ('=' (v+=yield_expr|v+=testlist_star_expr))*) `ast_for_expr_stmt(t, aa, av, v)`
+# ORIGINAL: testlist_star_expr: (test|star_expr) (',' (test|star_expr))* (',')?
+testlist_star_expr: (t+=test|t+=star_expr) (c+=',' (\1 \2)?)? `ast_for_testlist(t, c)`
+augassign: '+=' `Add()` | '-=' `Sub()` | '*=' `Mul()` | '/=' `Div()` | '%=' `Mod()` | '&=' `BitAnd()` | '|=' `BitOr()` | '^=' `BitXor()` |
+            '<<=' `LShift()` | '>>=' `RShift()` | '**=' `Pow()` | '//=' `FloorDiv()`
+# For normal assignments, additional restrictions enforced by the interpreter
+del_stmt: 'del' l=exprlist `Delete(_loc, [set_context(e, Del()) for e in l[0]])`
+pass_stmt: 'pass' `Pass(_loc)`
+flow_stmt: (break_stmt | continue_stmt | return_stmt | raise_stmt | yield_stmt) `_all[0]`
+break_stmt: 'break' `Break(_loc)`
+continue_stmt: 'continue' `Continue(_loc)`
+return_stmt: 'return' (t=testlist)? `Return(_loc, t)`
+yield_stmt: e=yield_expr `Expr(e.location, e)`
+raise_stmt: 'raise' (a=test ('from' b=test)?)? `Raise(_loc, a, b)`
+import_stmt: i=import_name `i` | i=import_from `i`
+import_name: 'import' n=dotted_as_names `Import(_loc, n)`
+# note below: the ('.' | '...') is necessary because '...' is tokenized as ELLIPSIS
+# ORIGINAL: import_from: ('from' (('.' | '...')* dotted_name | ('.' | '...')+) 'import' ('*' | '(' import_as_names ')' | import_as_names))
+import_from: ('from' (m=dotted_name | (d+='.' | d+='...') (d+='.' | d+='...')* (m=dotted_name)?)
+              'import' (s='*' | '(' n=import_as_names ')' | n=import_as_names))
+    `ImportFrom(_loc, '.'.join(t.value for t in m) if m else None, [alias('*', None)] if s else n, sum(len(t.type) for t in d))`
+import_as_name: n=NAME ('as' a=NAME)? `alias(n.value, a.value if a else None)`
+dotted_as_name: n=dotted_name ('as' a=NAME)? `alias('.'.join(t.value for t in n), a.value if a else None)`
+# ORIGINAL: import_as_names: import_as_name (',' import_as_name)* (',')?
+import_as_names: (n+=import_as_name (',' (\1)?)?) `n`
+dotted_as_names: n+=dotted_as_name (',' n+=dotted_as_name)* `n`
+dotted_name: t+=NAME ('.' t+=NAME)* `t`
+global_stmt: 'global' n+=NAME (',' n+=NAME)* `Global(_loc, [t.value for t in n])`
+nonlocal_stmt: 'nonlocal' n+=NAME (',' n+=NAME)* `Nonlocal(_loc, [t.value for t in n])`
+assert_stmt: 'assert' a=test (',' b=test)? `Assert(_loc, a, b)`
+
+compound_stmt: (if_stmt | while_stmt | for_stmt | try_stmt | with_stmt | funcdef | classdef | decorated) `_all[0]`
+if_stmt: t+='if' c+=test ':' s+=suite (t+='elif' c+=test ':' s+=suite)* ('else' ':' e=suite)? `ast_for_if_stmt(t, c, s, e)`
+while_stmt: 'while' c=test ':' s=suite ('else' ':' e=suite)? `While(_loc, c, s, e)`
+for_stmt: 'for' t=exprlist 'in' c=testlist ':' s=suite ('else' ':' e=suite)?
+    `For(_loc, set_context(Tuple(t[0][0].location, t[0], Store()) if t[1] else t[0][0], Store()), c, s, e)`
+try_stmt: 'try' ':' b=suite
+           (ec+=except_clause ':' es+=suite (ec+=except_clause ':' es+=suite)*
+            ('else' ':' l=suite)?
+            ('finally' ':' f=suite)? |
+           'finally' ':' f=suite) `Try(_loc, b, [kc(ks) for kc, ks in zip(ec, es)], l, f)`
+with_stmt: 'with' w+=with_item (',' w+=with_item)*  ':' b=suite `With(_loc, w, b)`
+with_item: t=test ('as' e=expr)? `withitem(t, set_context(e, Store()) if e else None)`
+# NB compile.c makes sure that the default except clause is last
+except_clause: 'except' (t=test ('as' n=NAME)?)? `lambda body: ExceptHandler(_loc, t, n.value if n else None, body)`
+suite: s=simple_stmt `flatten(s)` | NEWLINE INDENT s+=stmt (s+=stmt)* DEDENT `flatten(s)`
+
+test: a=or_test ('if' b=or_test 'else' c=test)? `IfExp(a.location, b, a, c) if b else a` | e=lambdef `e`
+test_nocond: e=or_test `e` | e=lambdef_nocond `e`
+lambdef: 'lambda' (a=varargslist)? ':' t=test `Lambda(_loc, a or arguments(None, None, None, None, None, None), t)`
+lambdef_nocond: 'lambda' (a=varargslist)? ':' t=test_nocond `Lambda(_loc, a or arguments(None, None, None, None, None, None), t)`
+or_test: l+=and_test ('or' l+=and_test)* `l[0] if len(l) == 1 else BoolOp(l[0].location, And(), l)`
+and_test: l+=not_test ('and' l+=not_test)* `l[0] if len(l) == 1 else BoolOp(l[0].location, Or(), l)`
+not_test: 'not' e=not_test `UnaryOp(_loc, Not(), e)` | e=comparison `e`
+comparison: l=expr (op+=comp_op r+=expr)* `l if not op else Compare(l.location, l, op, r)`
+comp_op
+  : '<' `Lt()`
+  | '>' `Gt()`
+  | '==' `Eq()`
+  | '>=' `GtE()`
+  | '<=' `LtE()`
+  | '!=' `NotEq()`
+  | 'in' `In()`
+  | 'not' 'in' `NotIn()`
+  | 'is' (n='not')? `IsNot() if n else Is()`
+  # ToyPython does not have '<>'.
+star_expr: '*' e=expr `Starred(_loc, e, Load())`
+expr: xor_expr ('|' xor_expr)* `ast_for_binop(_all)`
+xor_expr: and_expr ('^' and_expr)* `ast_for_binop(_all)`
+and_expr: shift_expr ('&' shift_expr)* `ast_for_binop(_all)`
+shift_expr: arith_expr (('<<'|'>>') arith_expr)* `ast_for_binop(_all)`
+arith_expr: term (('+'|'-') term)* `ast_for_binop(_all)`
+term: factor (('*'|'/'|'%'|'//') factor)* `ast_for_binop(_all)`
+factor
+  : '+' e=factor `UnaryOp(_loc, UAdd(), e)`
+  | '-' e=factor `UnaryOp(_loc, USub(), e)`
+  | '~' e=factor `UnaryOp(_loc, Invert(), e)`
+  | e=power `e`
+power: a=atom (t+=trailer)* ('**' f=factor)? `ast_for_power(a, t, f)`
+atom
+  : '(' (y=yield_expr|l=testlist_comp)? ')' `
+      y if y else
+      Tuple(_loc, None, Load()) if not l else
+      GeneratorExp(_loc, l[0][0], ast_for_comprehension(l[2])) if l[2] else
+      ast_for_testlist(l[0], l[1])`
+  | '[' (l=testlist_comp)? ']' `
+      List(_loc, None, Load()) if not l else
+      ListComp(_loc, l[0][0], ast_for_comprehension(l[2])) if l[2] else
+      List(_loc, l[0], Load())`
+  | '{' (d=dictorsetmaker)? '}' `d._replace(location=_loc) if d else Dict(_loc, None, None)`
+  | n=NAME `Name(_loc, n.value, Load())`
+  | n=NUMBER `Num(_loc, n.value)`
+  | s+=STRING (s+=STRING)* `Str(_loc, ''.join(t.value for t in s))`  # TODO: other string literals (especially Bytes)
+  | '...' `Ellipsis(_loc)`
+  | 'None' `NameConstant(_loc, None)`
+  | 'True' `NameConstant(_loc, True)`
+  | 'False' `NameConstant(_loc, False)`
+  | e=EMBEDEXPR `EmbedExp(_loc, e.value)`
+# ORIGINAL: testlist_comp: (test|star_expr) ( comp_for | (',' (test|star_expr))* (',')? )
+testlist_comp: (t+=test|t+=star_expr) ( f=comp_for | (c+=',' (\1 \3)?)? ) `(t, c, f)`
+trailer
+  : '(' (a=arglist)? ')' `lambda left_expr: ast_for_call(_loc, left_expr, a)`
+  | '[' s=subscriptlist ']' `lambda left_expr: Subscript(_loc, left_expr, s, Load())`
+  | '.' n=NAME `lambda left_expr: Attribute(_loc, left_expr, n.value, Load())`
+# ORIGINAL: subscriptlist: subscript (',' subscript)* (',')?
+subscriptlist: (s+=subscript (c+=',' (\1)?)?) `
+    s[0] if not c else
+    ExtSlice(s) if any(isinstance(k, Slice) for k in s) else
+    Index(Tuple(s[0].value.location, [k.value for k in s], Load()))`
+# ORIGINAL: subscript: test | (test)? ':' (test)? (sliceop)?
+subscript: (l=test (d=':' (u=test)? (s=sliceop)?)? | d=':' (u=test)? (s=sliceop)?) `Slice(l, u, s) if d else Index(l)`
+sliceop: ':' (s=test)? `s`
+# ORIGINAL: exprlist: (expr|star_expr) (',' (expr|star_expr))* (',')?
+exprlist: ((t+=expr|t+=star_expr) (c+=',' (\1)?)?) `(t, bool(c))`
+# ORIGINAL: testlist: test (',' test)* (',')?
+testlist: (t+=test (c+=',' (\1)?)?) `ast_for_testlist(t, c)`
+# ORIGINAL: dictorsetmaker: ( (test ':' test (comp_for | (',' test ':' test)* (',')?)) |
+#                             (test (comp_for | (',' test)* (',')?)) )
+dictorsetmaker: k1=test ( (':' v1=test (dc=comp_for | (',' (k+=test ':' v+=test \4)?)? )) |
+                          sc=comp_for | (',' (s+=test \6)?)? ) `
+    DictComp(k1.location, k1, v1, ast_for_comprehension(dc)) if dc else
+    SetComp(k1.location, k1, ast_for_comprehension(sc)) if sc else
+    Dict(k1.location, [k1]+k, [v1]+v) if v1 else
+    Set(k1.location, [k1]+s)`
+
+classdef: 'class' n=NAME ('(' (a=arglist)? ')')? ':' b=suite `ast_for_classdef(_loc, n.value, a, b)`
+
+# ORIGINAL: arglist: (argument ',')* (argument (',')? |'*' test (',' argument)* (',' '**' test)? |'**' test)
+arglist: (a+=arglist_item (',' (\1)?)?) `a`
+arglist_item: a=argument `a` | s='*' a=test `(s, a, None, None)` | s='**' a=test `(s, a, None, None)`
+# The reason that keywords are test nodes instead of NAME is that using NAME
+# results in an ambiguity. ast_for_call makes sure it's a NAME.
+# ORIGINAL: argument: test (comp_for)? | test '=' test  # Really (keyword '=')? test
+argument: t=test (c=comp_for | '=' v=test)? `(None, t, c, v)`
+comp_iter: c=comp_for `c` | c=comp_if `c`
+comp_for: f='for' t=exprlist 'in' i=or_test (r=comp_iter)? `[(f, t, i), r or []]`
+comp_if: i='if' c=test_nocond (r=comp_iter)? `[(i, c), r or []]`
+
+yield_expr: 'yield' ('from' f=test | t=testlist)? `YieldFrom(_loc, f) if f else Yield(_loc, t)`
+# The yield_arg nonterminal is inlined in yield_expr.

@@ -1,0 +1,43 @@
+
+from context import ParseError
+
+def parse(ctx, start_nt=None, close_with=None):
+    stack = [close_with or 'EOF', start_nt or %(start)r]
+    results = []
+    tok_iter = tokenizer(ctx, close_with)
+    token = next(tok_iter)
+
+    while True:
+        stack_top = stack[-1]
+
+        if isinstance(stack_top, int):
+            rule, action = RULES[stack_top]
+            stack.pop()
+            n = len(rule)
+            args = results[len(results) - n:]
+            del results[len(results) - n:]
+            results.append(action(ctx, *args))
+
+        elif stack_top not in TABLE:
+            if token.type != stack_top:
+                raise ParseError(token.location, "Expected " + stack_top)
+            stack.pop()
+            if not stack: break
+            results.append(token)
+            token = next(tok_iter)
+
+        else:
+            row = TABLE[stack_top]
+            if token.type not in row:
+                raise ParseError(token.location, "Unexpected {}, expected {}".format(
+                    repr(token.type), ', '.join(sorted(repr(k) for k in row))))
+            rule_num = row[token.type]
+            rule, action = RULES[rule_num]
+            stack.pop()
+            stack.append(rule_num)
+            stack.extend(reversed(rule))
+
+    return results[0]
+
+RULES = %(rules)r
+TABLE = %(table)r

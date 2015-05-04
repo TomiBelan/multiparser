@@ -1,0 +1,25 @@
+from toycalc.lex import tokenizer
+---
+`{ 'default_start': 'program', 'type': 'LR' }`
+
+program = statement ";" program `lambda ctx, a, b, c: None`
+program =                       `lambda ctx: None`
+
+statement = sum                 `lambda ctx, e: print(e)`
+
+sum = sum "+" product           `lambda ctx, a, op, b: a + b`
+sum = sum "-" product           `lambda ctx, a, op, b: a - b`
+sum = product                   `lambda ctx, e: e`
+
+product = product "*" factor    `lambda ctx, a, op, b: a * b`
+product = product "/" factor    `lambda ctx, a, op, b: a // b`
+product = factor                `lambda ctx, e: e`
+
+factor = "-" factor             `lambda ctx, op, e: -e`
+factor = power                  `lambda ctx, e: e`
+
+power = value "^" factor        `lambda ctx, a, op, b: a ** b`
+power = value                   `lambda ctx, e: e`
+
+value = NUMBER                  `lambda ctx, t: t.value`
+value = "(" sum ")"             `lambda ctx, l, e, r: e`

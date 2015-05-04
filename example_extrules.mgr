@@ -1,0 +1,34 @@
+from toycalc.lex import tokenizer
+
+handlers = {
+    "+": lambda l, r: l + r,
+    "-": lambda l, r: l - r,
+    "*": lambda l, r: l * r,
+    "/": lambda l, r: l // r,
+}
+
+def left_associative(l, ops, rs):
+    for op, r in zip(ops, rs):
+        handler = handlers[op.type]
+        l = handler(l, r)
+    return l
+---
+`{ 'default_start': 'program', 'type': 'LL' }`
+
+program: (statement ";")* `None`
+
+statement: e=sum `print(e)`
+
+sum: l=product ((ops+="+" | ops+="-") rs+=product)*
+      `left_associative(l, ops, rs)`
+
+product: l=factor ((ops+="*" | ops+="/") rs+=factor)*
+      `left_associative(l, ops, rs)`
+
+factor: "-" e=factor `-e`
+  | e=power `e`
+
+power: a=value ("^" b=factor)? `a if b is None else a ** b`
+
+value: t=NUMBER `t.value`
+  | "(" e=sum ")" `e`

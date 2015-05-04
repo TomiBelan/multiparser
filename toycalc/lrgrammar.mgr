@@ -1,0 +1,26 @@
+from toycalc.lex import tokenizer
+from toycalc.ast import *
+---
+`{
+    'default_start': 'expr',
+    'type': 'LR',
+    'precedence': [
+        [
+            ('left', ['+', '-']),
+            ('left', ['*', '/']),
+            ('precedence', [('expr', ('-', 'expr'))]),
+            ('right', ['^']),
+        ],
+    ],
+}`
+
+expr
+  : l=expr "+" r=expr `Add(_loc, l, r)`
+  | l=expr "-" r=expr `Sub(_loc, l, r)`
+  | l=expr "*" r=expr `Mul(_loc, l, r)`
+  | l=expr "/" r=expr `Div(_loc, l, r)`
+  | l=expr "^" r=expr `Pow(_loc, l, r)`
+  | "-" e=expr `UnaryMin(_loc, e)`
+  | n=NUMBER `Number(_loc, n.value)`
+  | e=EMBEDEXPR `Embedded(_loc, e.value)`
+  | "(" e=expr ")" `e`
