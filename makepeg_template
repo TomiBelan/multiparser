@@ -60,6 +60,7 @@ def parse(ctx, start_nt=None, close_with=None):
         ctx = buffer.ctx
         with self._choice():
 %(choices)s
+            self._error('no available options')
 
 ---
             with self._option():
